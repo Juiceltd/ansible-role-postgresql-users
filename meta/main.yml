@@ -1,6 +1,5 @@
 ---
 galaxy_info:
-  standalone: true
   role_name: postgresql_users
   author: Juiceltd
   description: >
