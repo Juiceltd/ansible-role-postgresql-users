@@ -1,5 +1,6 @@
 ---
 galaxy_info:
+  standalone: true
   role_name: postgresql_users
   namespace: juiceltd
   author: Juiceltd
