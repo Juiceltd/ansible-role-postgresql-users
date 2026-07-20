@@ -26,19 +26,16 @@ ansible-galaxy collection install -r requirements.yml
 
 ## Installation
 
-Install from a Git repository:
+Install the required PostgreSQL collection:
 
 ```bash
-ansible-galaxy role install git+https://github.com/Juiceltd/ansible-role-postgresql-users.git,main
+ansible-galaxy collection install community.postgresql
 ```
 
-Or add it to your project `requirements.yml`:
+Install the role from Ansible Galaxy:
 
-```yaml
-roles:
-  - name: postgresql_users
-    src: git+https://github.com/Juiceltd/ansible-role-postgresql-users.git
-    version: main
+```bash
+ansible-galaxy role install Juiceltd.postgresql_users
 ```
 
 ## Role Variables
