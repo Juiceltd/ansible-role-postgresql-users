@@ -1,6 +1,7 @@
 ---
 galaxy_info:
   role_name: postgresql_users
+  namespace: juiceltd
   author: Juiceltd
   description: >
     Ansible role for declarative PostgreSQL user, role,
