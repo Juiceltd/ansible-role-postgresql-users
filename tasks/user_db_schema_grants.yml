@@ -1,0 +1,121 @@
+---
+- name: Grant database privileges
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: database
+    objs: "{{ pg_db.name }}"
+    roles: "{{ pg_user.name }}"
+    privs: >-
+      {{
+        (pg_grant.privs is string)
+          | ternary(pg_grant.privs, (pg_grant.privs | join(',')))
+      }}
+    state: present
+  when: pg_grant.type == 'database'
+
+- name: Grant schema privileges
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: schema
+    objs: "{{ pg_schema_name }}"
+    roles: "{{ pg_user.name }}"
+    privs: >-
+      {{
+        (pg_grant.privs is string)
+          | ternary(pg_grant.privs, (pg_grant.privs | join(',')))
+      }}
+    state: present
+  loop: "{{ pg_grant.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema_name
+  when: pg_grant.type == 'schema'
+
+- name: Grant table privileges
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: table
+    schema: "{{ pg_schema_name }}"
+    objs: >-
+      {{
+        (
+          (pg_grant.objs | default('ALL_IN_SCHEMA')) is string
+        )
+          | ternary(
+              (pg_grant.objs | default('ALL_IN_SCHEMA')),
+              ((pg_grant.objs | default('ALL_IN_SCHEMA')) | join(','))
+            )
+      }}
+    roles: "{{ pg_user.name }}"
+    privs: >-
+      {{
+        (pg_grant.privs is string)
+          | ternary(pg_grant.privs, (pg_grant.privs | join(',')))
+      }}
+    state: present
+  loop: "{{ pg_grant.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema_name
+  when: pg_grant.type == 'table'
+
+- name: Apply default privileges for new tables (custom)
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: default_privs
+    objs: tables
+    schema: "{{ pg_schema_name }}"
+    roles: "{{ pg_user.name }}"
+    target_roles: >-
+      {{
+        (_default_privs_owners is string)
+          | ternary(_default_privs_owners, (_default_privs_owners | join(',')))
+      }}
+    privs: >-
+      {{
+        (
+          (pg_grant.default_privs_privs | default(pg_grant.privs)) is string
+        )
+          | ternary(
+              (pg_grant.default_privs_privs | default(pg_grant.privs)),
+              ((pg_grant.default_privs_privs | default(pg_grant.privs)) | join(','))
+            )
+      }}
+    state: present
+  vars:
+    _default_privs_owners: >-
+      {{
+        (
+          pg_grant.default_privs_owners
+          | default(
+              pg_db.default_privs_owners
+              | default(postgres_users_default_privs_owners)
+            )
+        )
+        if (
+          pg_grant.default_privs_owners is defined
+          or pg_db.default_privs_owners is defined
+          or postgres_users_default_privs_owners | length > 0
+        )
+        else [postgres_users_login_user]
+      }}
+  loop: "{{ pg_grant.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema_name
+  when:
+    - pg_grant.type == 'table'
+    - pg_grant.default_privs | default(pg_db.default_privs | default(postgres_users_default_privs))

@@ -1,0 +1,15 @@
+---
+- name: Apply pg_hba rules for user
+  become: true
+  community.postgresql.postgresql_pg_hba:
+    dest: "{{ postgres_users_pg_hba_file }}"
+    rules_behavior: combine
+    contype: "{{ postgres_users_pg_hba_contype }}"
+    databases: "{{ postgres_users_pg_hba_databases }}"
+    users: "{{ pg_user.name }}"
+    method: "{{ postgres_users_pg_hba_method }}"
+    rules: "{{ pg_user.pg_hba | default([]) }}"
+  when:
+    - pg_user.login | default(true)
+    - pg_user.pg_hba is defined
+  notify: Reload PostgreSQL

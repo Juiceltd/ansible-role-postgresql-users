@@ -1,0 +1,244 @@
+---
+- name: Validate postgres_users configuration
+  ansible.builtin.assert:
+    that:
+      - item.name is string
+      - item.password is defined
+      - >-
+        item.search_path is not defined
+        or item.search_path is string
+        or (
+          item.search_path is iterable
+          and item.search_path is not string
+          and item.search_path | length > 0
+        )
+      - item.dbs is defined
+      - item.dbs is iterable
+      - item.dbs is not string
+      - item.dbs | length > 0
+    fail_msg: "Invalid postgres_users entry. Required fields: name, password, and a non-empty dbs list."
+  loop: "{{ postgres_users }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  when: postgres_users is defined and (postgres_users | length > 0)
+  no_log: true
+
+- name: Validate postgres_users_db_owners configuration
+  ansible.builtin.assert:
+    that:
+      - item.name is string
+      - item.password is defined
+      - item.login is not defined or item.login is boolean
+    fail_msg: "Invalid postgres_users_db_owners entry. Required fields: name and password."
+  loop: "{{ postgres_users_db_owners }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  when: postgres_users_db_owners is defined and (postgres_users_db_owners | length > 0)
+  no_log: true
+
+- name: Validate pg_hba settings when enabled
+  ansible.builtin.assert:
+    that:
+      - postgres_users_pg_hba_file is defined
+      - postgres_users_pg_hba_file | length > 0
+    fail_msg: "postgres_users_pg_hba_file must be set when postgres_users_manage_pg_hba is true"
+  when:
+    - postgres_users_manage_pg_hba | default(false)
+    - postgres_users is defined and (postgres_users | length > 0)
+
+- name: Validate pg_hba entries per user
+  ansible.builtin.assert:
+    that:
+      - item.pg_hba is iterable
+      - item.pg_hba is not string
+      - item.login | default(true)
+    fail_msg: "Invalid pg_hba entry for {{ item.name }} (requires login: true and pg_hba as a list)"
+  loop: "{{ postgres_users }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  when:
+    - postgres_users_manage_pg_hba | default(false)
+    - postgres_users is defined and (postgres_users | length > 0)
+    - item.pg_hba is defined
+  no_log: true
+
+- name: Check for psycopg/psycopg2 driver
+  become: true
+  ansible.builtin.command: >-
+    python3 -c "import importlib.util, sys;
+    sys.exit(0 if (importlib.util.find_spec('psycopg') or importlib.util.find_spec('psycopg2')) else 1)"
+  register: _pg_driver_check
+  changed_when: false
+  failed_when: false
+  when: postgres_users is defined and (postgres_users | length > 0)
+
+- name: Install PostgreSQL python driver if missing
+  become: true
+  ansible.builtin.package:
+    name: "{{ postgres_users_driver_packages }}"
+    state: present
+  when:
+    - postgres_users is defined and (postgres_users | length > 0)
+    - _pg_driver_check.rc != 0
+
+- name: Re-check for psycopg/psycopg2 driver
+  become: true
+  ansible.builtin.command: >-
+    python3 -c "import importlib.util, sys;
+    sys.exit(0 if (importlib.util.find_spec('psycopg') or importlib.util.find_spec('psycopg2')) else 1)"
+  register: _pg_driver_recheck
+  changed_when: false
+  when:
+    - postgres_users is defined and (postgres_users | length > 0)
+    - _pg_driver_check.rc != 0
+  failed_when: _pg_driver_recheck.rc != 0
+
+- name: Ensure database owner users exist
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_user:
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    role_attr_flags: >-
+      {{
+        (item.role_attr_flags is defined)
+          | ternary(
+              (item.role_attr_flags is string)
+                | ternary(item.role_attr_flags, (item.role_attr_flags | join(','))),
+              ((item.login | default(true)) | ternary('LOGIN', ''))
+            )
+      }}
+    state: present
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+  loop: "{{ postgres_users_db_owners }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: postgres_users_db_owners is defined and (postgres_users_db_owners | length > 0)
+  no_log: true
+
+- name: Validate postgres_users databases and schemas
+  ansible.builtin.assert:
+    that:
+      - db_item.name is string
+      - (db_item.schemas | default([]) | length > 0) or (db_item.grants | default([]) | length > 0)
+      - not postgres_users_create_databases | default(false)
+        or db_item.owner is not defined
+        or (
+          _db_owner is string
+          and (
+            _db_owner == user_item.name
+            or (postgres_users_db_owners | default([]) | selectattr('name', 'equalto', _db_owner) | list | length > 0)
+          )
+        )
+    fail_msg: "Invalid postgres_users db entry for {{ user_item.name }} / {{ db_item.name | default('unnamed') }}."
+  loop: "{{ postgres_users | subelements('dbs') }}"
+  loop_control:
+    loop_var: user_db
+    label: "{{ user_item.name }}:{{ db_item.name }}"
+  vars:
+    user_item: "{{ user_db.0 }}"
+    db_item: "{{ user_db.1 }}"
+    _db_owner: "{{ db_item.owner | default(user_item.name) }}"
+  when: postgres_users is defined and (postgres_users | length > 0)
+
+- name: Ensure postgres users exist
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_user:
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    role_attr_flags: "{{ (item.login | default(true)) | ternary('LOGIN', '') }}"
+    configuration: >-
+      {{
+        (item.search_path is defined)
+          | ternary(
+              {
+                'search_path': (
+                  (item.search_path is string)
+                    | ternary(item.search_path, (item.search_path | join(', ')))
+                )
+              },
+              omit
+            )
+      }}
+    quote_configuration_values: "{{ (item.search_path is defined) | ternary(false, omit) }}"
+    state: present
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+  loop: "{{ postgres_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: postgres_users is defined and (postgres_users | length > 0)
+  no_log: true
+
+- name: Check whether databases exist before creation
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_query:
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    query: "SELECT 1 FROM pg_database WHERE datname = %s"
+    positional_args:
+      - "{{ db_item.name }}"
+  register: _db_create_check
+  loop: "{{ postgres_users | subelements('dbs') }}"
+  loop_control:
+    loop_var: user_db
+    index_var: db_index
+    label: "{{ user_item.name }}:{{ db_item.name }}"
+  vars:
+    user_item: "{{ user_db.0 }}"
+    db_item: "{{ user_db.1 }}"
+  when:
+    - postgres_users_create_databases | default(false)
+    - postgres_users is defined and (postgres_users | length > 0)
+    - db_item.owner is defined
+
+- name: Ensure databases exist
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_db:
+    name: "{{ db_item.name }}"
+    owner: "{{ db_item.owner }}"
+    encoding: "{{ db_item.encoding | default(omit) }}"
+    lc_collate: "{{ db_item.lc_collate | default(omit) }}"
+    lc_ctype: "{{ db_item.lc_ctype | default(omit) }}"
+    template: "{{ db_item.template | default(omit) }}"
+    state: "{{ db_item.state | default('present') }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+  loop: "{{ postgres_users | subelements('dbs') }}"
+  loop_control:
+    loop_var: user_db
+    index_var: db_index
+    label: "{{ user_item.name }}:{{ db_item.name }}"
+  vars:
+    user_item: "{{ user_db.0 }}"
+    db_item: "{{ user_db.1 }}"
+  when:
+    - postgres_users_create_databases | default(false)
+    - postgres_users is defined and (postgres_users | length > 0)
+    - db_item.owner is defined
+    - _db_create_check.results[db_index].query_result | length == 0
+
+- name: Manage pg_hba rules per user
+  ansible.builtin.include_tasks: user_pg_hba.yml
+  loop: "{{ postgres_users }}"
+  loop_control:
+    loop_var: pg_user
+    label: "{{ pg_user.name }}"
+  when:
+    - postgres_users is defined and (postgres_users | length > 0)
+    - postgres_users_manage_pg_hba | default(false)
+
+- name: Manage grants per user
+  ansible.builtin.include_tasks: user_db.yml
+  loop: "{{ postgres_users }}"
+  loop_control:
+    loop_var: pg_user
+    label: "{{ pg_user.name }}"
+  when: postgres_users is defined and (postgres_users | length > 0)

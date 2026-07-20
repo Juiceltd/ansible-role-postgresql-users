@@ -1,0 +1,31 @@
+---
+postgres_version: "16"
+
+postgres_users_login_unix_socket: "/var/run/postgresql"
+postgres_users_login_user: "postgres"
+postgres_users_login_db: "postgres"
+
+# Global defaults for default privileges
+postgres_users_default_privs: true
+postgres_users_default_privs_owners: []
+
+# Optional pg_hba management (disabled by default)
+postgres_users_manage_pg_hba: false
+postgres_users_pg_hba_file: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+postgres_users_pg_hba_contype: "host"
+postgres_users_pg_hba_databases: "all"
+postgres_users_pg_hba_method: "md5"
+
+# Python driver packages to install on target if psycopg/psycopg2 is missing
+postgres_users_driver_packages:
+  - python3-psycopg2
+
+# Enable database creation (disabled by default)
+postgres_users_create_databases: false
+
+# Owner users to ensure exist before database creation
+postgres_users_db_owners: []
+
+# Users to manage
+# See README.md for structure
+postgres_users: []

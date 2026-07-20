@@ -1,0 +1,46 @@
+---
+- name: Check whether databases exist
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_query:
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    query: "SELECT 1 FROM pg_database WHERE datname = %s"
+    positional_args:
+      - "{{ pg_db.name }}"
+  register: _db_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ pg_user.dbs }}"
+  loop_control:
+    loop_var: pg_db
+    index_var: db_index
+
+- name: Grant CONNECT on databases
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: database
+    objs: "{{ pg_db.name }}"
+    roles: "{{ pg_user.name }}"
+    privs: CONNECT
+    state: present
+  loop: "{{ pg_user.dbs }}"
+  loop_control:
+    loop_var: pg_db
+    index_var: db_index
+  when:
+    - pg_db.grants is not defined or (pg_db.grants | selectattr('type', 'equalto', 'database') | list | length == 0)
+    - _db_check.results[db_index].query_result | length > 0
+
+- name: Manage grants and revokes
+  ansible.builtin.include_tasks: user_db_schema.yml
+  loop: "{{ pg_user.dbs }}"
+  loop_control:
+    loop_var: pg_db
+    index_var: db_index
+  when: _db_check.results[db_index].query_result | length > 0

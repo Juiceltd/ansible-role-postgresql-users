@@ -1,0 +1,209 @@
+---
+- name: Compute allowed schemas from config
+  ansible.builtin.set_fact:
+    _allowed_schemas: >-
+      {{
+        (
+          (pg_db.schemas | default([]) | map(attribute='name') | list)
+          + (pg_db.grants | default([]) | selectattr('type', 'in', ['schema', 'table'])
+             | map(attribute='schemas') | map('default', []) | list | flatten)
+        ) | unique
+      }}
+
+- name: Validate schema entries (minimal mode)
+  ansible.builtin.assert:
+    that:
+      - pg_schema.name is string
+    fail_msg: "Invalid schema entry for {{ pg_user.name }} / {{ pg_db.name }}: {{ pg_schema | to_nice_yaml }}"
+  loop: "{{ pg_db.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema
+
+- name: Validate grants configuration
+  ansible.builtin.assert:
+    that:
+      - pg_grant.type in ['database', 'schema', 'table']
+      - pg_grant.privs is defined
+      - (pg_grant.type == 'database') or (pg_grant.schemas is iterable and pg_grant.schemas | length > 0)
+    fail_msg: "Invalid grant entry for {{ pg_user.name }} / {{ pg_db.name }}: {{ pg_grant | to_nice_yaml }}"
+  loop: "{{ pg_db.grants | default([]) }}"
+  loop_control:
+    loop_var: pg_grant
+
+- name: Check allowed schemas exist
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_query:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    query: "SELECT 1 FROM pg_namespace WHERE nspname = %s"
+    positional_args:
+      - "{{ pg_schema_name }}"
+  register: _schema_check
+  failed_when: _schema_check.query_result | length == 0
+  loop: "{{ _allowed_schemas }}"
+  loop_control:
+    loop_var: pg_schema_name
+
+- name: Apply schema grants (USAGE)
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: schema
+    objs: "{{ pg_schema.name }}"
+    roles: "{{ pg_user.name }}"
+    privs: USAGE
+    state: present
+  loop: "{{ pg_db.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema
+  when: pg_db.schemas is defined and (pg_db.grants is not defined or pg_db.grants | length == 0)
+
+- name: Apply table grants (SELECT)
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: table
+    schema: "{{ pg_schema.name }}"
+    objs: ALL_IN_SCHEMA
+    roles: "{{ pg_user.name }}"
+    privs: SELECT
+    state: present
+  loop: "{{ pg_db.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema
+  when: pg_db.schemas is defined and (pg_db.grants is not defined or pg_db.grants | length == 0)
+
+- name: Apply default privileges for new tables (minimal mode)
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: default_privs
+    objs: tables
+    schema: "{{ pg_schema.name }}"
+    roles: "{{ pg_user.name }}"
+    target_roles: >-
+      {{
+        (_default_privs_owners is string)
+          | ternary(_default_privs_owners, (_default_privs_owners | join(',')))
+      }}
+    privs: SELECT
+    state: present
+  vars:
+    _default_privs_enabled: "{{ pg_schema.default_privs | default(pg_db.default_privs | default(postgres_users_default_privs)) }}"
+    _default_privs_owners: >-
+      {{
+        (
+          pg_schema.default_privs_owners
+          | default(
+              pg_db.default_privs_owners
+              | default(postgres_users_default_privs_owners)
+            )
+        )
+        if (
+          pg_schema.default_privs_owners is defined
+          or pg_db.default_privs_owners is defined
+          or postgres_users_default_privs_owners | length > 0
+        )
+        else [postgres_users_login_user]
+      }}
+  loop: "{{ pg_db.schemas | default([]) }}"
+  loop_control:
+    loop_var: pg_schema
+  when:
+    - pg_db.schemas is defined and (pg_db.grants is not defined or pg_db.grants | length == 0)
+    - _default_privs_enabled
+
+- name: Apply custom grants
+  ansible.builtin.include_tasks: user_db_schema_grants.yml
+  loop: "{{ pg_db.grants | default([]) }}"
+  loop_control:
+    loop_var: pg_grant
+
+- name: Fetch non-system schemas for revoke pass
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_query:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    query: >-
+      SELECT nspname
+      FROM pg_namespace
+      WHERE nspname NOT LIKE 'pg_%'
+        AND nspname <> 'information_schema'
+  register: _all_schemas
+
+- name: Compute schemas to revoke
+  ansible.builtin.set_fact:
+    _revoke_schemas: "{{ (_all_schemas.query_result | map(attribute='nspname') | list) | difference(_allowed_schemas) }}"
+
+- name: Revoke ALL on schema public for user when not allowed
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: schema
+    objs: public
+    roles: "{{ pg_user.name }}"
+    privs: ALL
+    state: absent
+  when: "'public' not in _allowed_schemas"
+
+- name: Revoke ALL on tables in schema public for user when not allowed
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: table
+    schema: public
+    objs: ALL_IN_SCHEMA
+    roles: "{{ pg_user.name }}"
+    privs: ALL
+    state: absent
+  when: "'public' not in _allowed_schemas"
+
+- name: Revoke ALL on other schemas
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: schema
+    objs: "{{ item }}"
+    roles: "{{ pg_user.name }}"
+    privs: ALL
+    state: absent
+  loop: "{{ _revoke_schemas }}"
+  when: pg_db.revoke_unspecified_schemas | default(true)
+
+- name: Revoke ALL on tables in other schemas
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_privs:
+    login_db: "{{ pg_db.name }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    type: table
+    schema: "{{ item }}"
+    objs: ALL_IN_SCHEMA
+    roles: "{{ pg_user.name }}"
+    privs: ALL
+    state: absent
+  loop: "{{ _revoke_schemas }}"
+  when: pg_db.revoke_unspecified_schemas | default(true)

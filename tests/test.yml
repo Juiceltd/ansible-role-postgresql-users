@@ -1,0 +1,6 @@
+---
+- name: Syntax check role defaults
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - role: ..

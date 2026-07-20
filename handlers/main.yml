@@ -1,0 +1,9 @@
+---
+- name: Reload PostgreSQL
+  become: true
+  become_user: "{{ postgres_users_login_user }}"
+  community.postgresql.postgresql_query:
+    login_db: "{{ postgres_users_login_db }}"
+    login_unix_socket: "{{ postgres_users_login_unix_socket }}"
+    login_user: "{{ postgres_users_login_user }}"
+    query: "SELECT pg_reload_conf()"
