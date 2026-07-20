@@ -1,24 +1,35 @@
 ---
 galaxy_info:
-  namespace: juiceltd
   role_name: postgresql_users
+  namespace: juiceltd
   author: Juiceltd
-  description: Manage PostgreSQL users, database privileges, schema grants, default privileges, and optional pg_hba rules.
+  description: >
+    Ansible role for declarative PostgreSQL user, role,
+    privilege, default privilege, schema access,
+    search_path, and pg_hba.conf management.
   license: MIT
+
   min_ansible_version: "2.14"
+
   platforms:
-    - name: Debian
-      versions:
-        - all
     - name: Ubuntu
       versions:
-        - all
+        - jammy
+        - noble
+
+    - name: Debian
+      versions:
+        - bookworm
+
   galaxy_tags:
     - postgresql
     - postgres
     - database
     - users
+    - privileges
     - grants
-    - pghba
+    - security
+    - access
+    - automation
 
 dependencies: []
